@@ -540,12 +540,14 @@ with col_left:
         model_choice = st.selectbox(
             "Gemini Model",
             [
-                "gemini-2.0-flash",
-                "gemini-2.0-flash-lite",
-                "gemini-1.5-pro",
-                "gemini-1.5-flash",
+                "gemini-2.5-flash-lite",   # FREE ✅ — 15 req/min, 1000 req/day  ⭐ Best for free tier
+                "gemini-2.5-flash",        # FREE ✅ — 10 req/min, 250 req/day
+                "gemini-2.5-pro",          # FREE ✅ — 5 req/min,  100 req/day
+                "gemini-2.0-flash",        # FREE ✅ — stable older model
+                "gemini-2.0-flash-lite",   # FREE ✅ — fastest, very lightweight
             ],
-            index=0,
+            index=0  # default to flash-lite (most free quota)
+        ),
             help=(
                 "gemini-2.0-flash → fastest, free tier friendly\n"
                 "gemini-1.5-pro → best for complex scripts"
