@@ -546,8 +546,7 @@ with col_left:
                 "gemini-2.0-flash",        # FREE ✅ — stable older model
                 "gemini-2.0-flash-lite",   # FREE ✅ — fastest, very lightweight
             ],
-            index=0  # default to flash-lite (most free quota)
-        ),
+            index=0,  # default to flash-lite (most free quota)),
             help=(
                 "gemini-2.0-flash → fastest, free tier friendly\n"
                 "gemini-1.5-pro → best for complex scripts"
