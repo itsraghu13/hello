@@ -437,8 +437,74 @@ def count_lines(code: str) -> int:
     return sum(1 for line in code.splitlines() if line.strip())
 
 
-def call_agent(code: str, model_name: str, api_key: str) -> tuple[str, float]:
+# Patterns that indicate incomplete/placeholder code from Lakebridge
+INCOMPLETE_MARKERS = [
+    "No handler defined for type",
+    "TODO: implement",
+    "raise NotImplementedError",
+    "pass  # not implemented",
+    "# FIXME",
+    "# placeholder",
+]
+
+VALIDATION_PROMPT = """You are reviewing a rewritten Databricks PySpark notebook.
+Fix ALL of the following issues and return the corrected full notebook inside a ```python block:
+
+1. COMPLETENESS: If the code appears cut off or incomplete, complete it properly.
+2. AGGREGATIONS: Find any groupBy() without .agg() and add correct aggregations.
+   Use sum() for amount/value columns, first() for status/flag columns with comment.
+3. PLACEHOLDERS: Remove ALL blocks containing these patterns and replace with correct logic:
+   - "No handler defined for type"
+   - "TODO: implement"
+   - "raise NotImplementedError"
+   - Any other placeholder or stub code
+4. MISSING LOGIC: Ensure all transformation steps are fully implemented.
+
+Return ONLY the corrected full notebook inside a ```python code block.
+Do not explain anything outside the code block."""
+
+
+def is_output_cut_off(code: str) -> bool:
+    """Detect if the generated output was truncated mid-way.
+
+    Args:
+        code: Generated notebook code to inspect.
+
+    Returns:
+        True if the output appears to be cut off.
+    """
+    stripped = code.strip()
+    if not stripped:
+        return True
+    # Cut off if last meaningful line is incomplete
+    last_lines = [l for l in stripped.splitlines()[-10:] if l.strip()]
+    if not last_lines:
+        return True
+    last = last_lines[-1].strip()
+    # Signs of truncation: open brackets, incomplete statements
+    cut_off_signs = (
+        last.endswith(("(", ",", "\\", ":", "[", "{"))
+        or last.startswith(("def ", "class ", "if ", "for ", "with "))
+        and not last.endswith(":")
+    )
+    return cut_off_signs
+
+
+def has_incomplete_markers(code: str) -> bool:
+    """Check if the code contains known placeholder or incomplete patterns.
+
+    Args:
+        code: Generated notebook code to inspect.
+
+    Returns:
+        True if incomplete/placeholder markers are found.
+    """
+    return any(marker.lower() in code.lower() for marker in INCOMPLETE_MARKERS)
+
+
+def call_agent(code: str, model_name: str, api_key: str) -> tuple[str, float, list[str]]:
     """Send the input code to the Google Gemini API and return the rewritten notebook.
+    Automatically runs a second validation pass if output is cut off or incomplete.
 
     Args:
         code: Raw PySpark pipeline source code to rewrite.
@@ -446,30 +512,56 @@ def call_agent(code: str, model_name: str, api_key: str) -> tuple[str, float]:
         api_key: Google Gemini API key.
 
     Returns:
-        Tuple of (rewritten_code, elapsed_seconds).
+        Tuple of (rewritten_code, elapsed_seconds, warnings_list).
     """
     genai.configure(api_key=api_key)
+    warnings = []
 
     model = genai.GenerativeModel(
         model_name=model_name,
         system_instruction=SYSTEM_PROMPT,
         generation_config=genai.GenerationConfig(
-            max_output_tokens=8192,
+            max_output_tokens=65536,   # max available — prevents cut-off
             temperature=0.2,
         ),
     )
 
     prompt = (
         "Please rewrite the following PySpark / Databricks pipeline script "
-        "according to the standards in your instructions.\n\n"
+        "according to the standards in your instructions. "
+        "Make sure to output the COMPLETE notebook — do not stop early.\n\n"
         f"```python\n{code}\n```"
     )
 
     t0 = time.time()
     response = model.generate_content(prompt)
-    elapsed = round(time.time() - t0, 1)
+    result = extract_python_code(response.text)
 
-    return extract_python_code(response.text), elapsed
+    # ── Pass 2: Validate & fix if needed ──────────────────────────────────────
+    needs_fix_pass = is_output_cut_off(result) or has_incomplete_markers(result)
+
+    if needs_fix_pass:
+        if is_output_cut_off(result):
+            warnings.append("⚠️ Output appeared cut off — ran auto-completion pass.")
+        if has_incomplete_markers(result):
+            warnings.append("⚠️ Placeholder/incomplete blocks detected — ran auto-fix pass.")
+
+        fix_prompt = (
+            f"{VALIDATION_PROMPT}\n\n"
+            f"Here is the notebook to fix:\n\n```python\n{result}\n```"
+        )
+        fix_model = genai.GenerativeModel(
+            model_name=model_name,
+            generation_config=genai.GenerationConfig(
+                max_output_tokens=65536,
+                temperature=0.1,
+            ),
+        )
+        fix_response = fix_model.generate_content(fix_prompt)
+        result = extract_python_code(fix_response.text)
+
+    elapsed = round(time.time() - t0, 1)
+    return result, elapsed, warnings
 
 
 # ─────────────────────────────────────────────
@@ -601,13 +693,22 @@ with col_right:
         else:
             with st.spinner("Gemini is rewriting your pipeline…"):
                 progress = st.progress(0)
-                for pct in [15, 35, 55]:
-                    time.sleep(0.3)
-                    progress.progress(pct)
+                status_box = st.empty()
                 try:
-                    result, elapsed = call_agent(raw_code, model_choice, api_key)
+                    status_box.info("⏳ Pass 1 — Rewriting notebook...")
+                    progress.progress(20)
+                    result, elapsed, warnings = call_agent(raw_code, model_choice, api_key)
+                    progress.progress(90)
+
+                    if warnings:
+                        status_box.warning(
+                            "Pass 2 auto-fix was triggered:\n" + "\n".join(warnings)
+                        )
+                    else:
+                        status_box.empty()
+
                     progress.progress(100)
-                    time.sleep(0.2)
+                    time.sleep(0.3)
                     progress.empty()
 
                     st.session_state.rewritten_code = result
@@ -616,11 +717,13 @@ with col_right:
                         "cells": count_cells(result),
                         "out_lines": count_lines(result),
                         "model": model_choice.replace("gemini-", "").replace("-", " ").title(),
+                        "warnings": warnings,
                     }
-                    st.success(f"✓ Rewritten in {elapsed}s")
+                    st.success(f"✓ Rewritten in {elapsed}s" + (" (2-pass fix applied)" if warnings else ""))
 
                 except Exception as exc:
                     progress.empty()
+                    status_box.empty()
                     err = str(exc).lower()
                     if "api_key" in err or "credential" in err or "permission" in err:
                         st.error("❌ Invalid Google API Key — check your Streamlit secret.")
