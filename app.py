@@ -525,7 +525,15 @@ with col_left:
             label_visibility="collapsed",
         )
         if uploaded:
-            raw_code = uploaded.read().decode("utf-8")
+            raw_bytes = uploaded.read()
+            for encoding in ("utf-8", "utf-8-sig", "latin-1", "cp1252"):
+                try:
+                    raw_code = raw_bytes.decode(encoding)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            else:
+                raw_code = raw_bytes.decode("latin-1", errors="replace")
             st.success(f"✓ Loaded: `{uploaded.name}` — {count_lines(raw_code):,} lines")
             with st.expander("Preview uploaded file", expanded=False):
                 st.code(
@@ -540,13 +548,12 @@ with col_left:
         model_choice = st.selectbox(
             "Gemini Model",
             [
-                "gemini-2.5-flash-lite",   # FREE ✅ — 15 req/min, 1000 req/day  ⭐ Best for free tier
-                "gemini-2.5-flash",        # FREE ✅ — 10 req/min, 250 req/day
-                "gemini-2.5-pro",          # FREE ✅ — 5 req/min,  100 req/day
-                "gemini-2.0-flash",        # FREE ✅ — stable older model
-                "gemini-2.0-flash-lite",   # FREE ✅ — fastest, very lightweight
+                "gemini-2.0-flash",
+                "gemini-2.0-flash-lite",
+                "gemini-1.5-pro",
+                "gemini-1.5-flash",
             ],
-            index=0,  # default to flash-lite (most free quota)),
+            index=0,
             help=(
                 "gemini-2.0-flash → fastest, free tier friendly\n"
                 "gemini-1.5-pro → best for complex scripts"
